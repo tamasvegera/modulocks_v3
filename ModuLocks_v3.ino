@@ -9,21 +9,19 @@
 #include <SPI.h>
 #include <Ticker.h>
 
-#define NEEDED_EEPROM_SIZE    1024
+#define NEEDED_EEPROM_SIZE    2048
 #define CONFIG_EEPROM_ADDR    0
 #define MAX_SENSORS   10
 #define NO_SENSOR_TYPES 5   // add 1 extra to sensor types
 #define NO_RELAY_OUTS   3
 #define MAX_SOUND_FILENAME_SIZE 64
+#define MAX_CARD_LABEL_LENGTH 20
 
 #define STORED_RFID_CARDS   5
 #define CARD_UID_MAX_LENGTH   10
 
 Adafruit_MCP23017 mcp;
 Ticker sec_ticker;
-
-uint8_t last_read_cards_uid_length[MAX_SENSORS];
-uint8_t last_read_cards[MAX_SENSORS][CARD_UID_MAX_LENGTH];
 
 enum game_status{NOT_SOLVED, DELAYED_SOLVED, WAIT_FOR_CHECK, SOLVED};
 
@@ -38,7 +36,7 @@ enum sensor_types_enum{SENSOR_NONE, SENSOR_RFID, SENSOR_IR, SENSOR_TOUCH, SENSOR
 //SSID and Password to your ESP Access Point
 const char* ssid = "ESPWebServer";
 const char* password = "12345678";
- 
+
 uint8_t io_to_expio[MAX_SENSORS] = {15, 14, 13, 12, 11, 10, 9, 8, 7, 6};
 uint8_t relay_expios[NO_RELAY_OUTS] = {1, 2, 3};
 
@@ -48,10 +46,15 @@ ESP8266WebServer server(80); //Server on port 80
 
 enum relay_switch_states {relay_NC, relay_NO};
 
-struct RFID_cards_config
+struct RFID_card
 {
-  uint8_t cards[STORED_RFID_CARDS][CARD_UID_MAX_LENGTH];
-  uint8_t ui_length[STORED_RFID_CARDS];
+  char card_name[MAX_CARD_LABEL_LENGTH];
+  uint8_t uid[CARD_UID_MAX_LENGTH];
+  uint8_t uid_length;
+};
+struct RFID_sensor_config
+{
+  struct RFID_card cards[STORED_RFID_CARDS];
 };
 struct SensorConfig
 {
@@ -72,9 +75,11 @@ struct CONFIG
     struct RelayConfig relays_config[NO_RELAY_OUTS];
     char sound_file[MAX_SOUND_FILENAME_SIZE];
     uint8_t game_solved_delay;
-    struct RFID_cards_config rfid_cards[MAX_SENSORS];
+    struct RFID_sensor_config rfid_sensor[MAX_SENSORS];
 } main_config;
-  
+
+struct RFID_card last_read_cards[MAX_SENSORS];
+
 String SendMainHTML()
 {
   uint8_t i, j;
@@ -239,7 +244,7 @@ void handleConfig()
 
 void reset_config()
 {
-  uint8_t i,j;
+  uint8_t i,j,k;
   main_config.game_solved_delay = 0;
   
   for(i=0; i<MAX_SENSORS; i++)
@@ -247,7 +252,11 @@ void reset_config()
     main_config.all_sensor_config[i].type = 0;
     main_config.all_sensor_config[i].on_off = 0;
     for(j=0; j<STORED_RFID_CARDS; j++)
-      main_config.rfid_cards[i].ui_length[j] = 0;
+    {
+      main_config.rfid_sensor[i].cards[j].uid_length = 0;
+      for(k=0; k<MAX_CARD_LABEL_LENGTH; k++)
+        main_config.rfid_sensor[i].cards[j].card_name[k] = 0;
+    }
   }
   for(i=0; i<NO_RELAY_OUTS; i++)
   {
@@ -311,18 +320,18 @@ uint8_t check_game_solved()
         {
           // copy current read ID to last_read_cards
           for(j=0; j<rfids[i]->uid.size; j++)
-            last_read_cards[i][j] = rfids[i]->uid.uidByte[j];
-          last_read_cards_uid_length[i] = rfids[i]->uid.size;
+            last_read_cards[i].uid[j] = rfids[i]->uid.uidByte[j];
+          last_read_cards[i].uid_length = rfids[i]->uid.size;
 
           // check if card is in saved cards of that sensor
           game_solved = false;
           for(j=0; j<STORED_RFID_CARDS; j++)
           {
             current_card_matched = true;
-            for(k=0; k< last_read_cards_uid_length[i]; k++)
-              if(main_config.rfid_cards[i].cards[j][k] != last_read_cards[i][k])
+            for(k=0; k< last_read_cards[i].uid_length; k++)
+              if(main_config.rfid_sensor[i].cards[j].uid[k] != last_read_cards[i].uid[k])
                 current_card_matched = false;
-            if(current_card_matched && last_read_cards_uid_length[i])
+            if(current_card_matched && last_read_cards[i].uid_length)
             {
               game_solved = true;
               break;
@@ -331,9 +340,9 @@ uint8_t check_game_solved()
         }
         else
         {
-          last_read_cards_uid_length[i] = 0;
+          last_read_cards[i].uid_length = 0;
           for(j=0; j<rfids[i]->uid.size; j++)
-            last_read_cards[i][j] = 0x00;
+            last_read_cards[i].uid[j] = 0x00;
         }   
         rfids[i]->PICC_IsNewCardPresent();
         break;
@@ -497,8 +506,8 @@ String send_set_rfid_cards_html(uint8_t sensor_id)
   ptr += "</center></b><br>";
 
   ptr+= "Current card: <input type=\"text\" value=\"";
-  for(i=0; i<last_read_cards_uid_length[sensor_id]; i++)
-    ptr += String(last_read_cards[sensor_id][i], HEX) + " ";
+  for(i=0; i<last_read_cards[sensor_id].uid_length; i++)
+    ptr += String(last_read_cards[sensor_id].uid[i], HEX) + " ";
   ptr += "\" readonly> ";
   ptr += "<a href=\"/set_rfid_cards?sensor_id=";
   ptr += String(sensor_id);
@@ -511,13 +520,20 @@ String send_set_rfid_cards_html(uint8_t sensor_id)
     ptr += "\"><button>Save --></button></a>";
 
     ptr += "<input type=\"text\" value=\"";
-    for(j=0; j<main_config.rfid_cards[sensor_id].ui_length[i]; j++)
-      ptr += String(main_config.rfid_cards[sensor_id].cards[i][j], HEX) + " ";
+    for(j=0; j<main_config.rfid_sensor[sensor_id].cards[i].uid_length; j++)
+      ptr += String(main_config.rfid_sensor[sensor_id].cards[i].uid[j], HEX) + " ";
     ptr += "\" readonly>";
 
     ptr += "<a href=\"/delete_card?sensor_id=" + String(sensor_id);
     ptr += "&slot_number=" + String(i);
     ptr += "\"><button>Delete</button></a>";    
+
+    ptr += "<form action=\"/save_card_label?sensor_id=" + String(sensor_id);
+    ptr += "&slot_number=" + String(i);
+    ptr += "\" method=\"POST\">Label: ";
+    ptr += "<input type=\"text\" name=\"card_label\" value=\"" + String(main_config.rfid_sensor[sensor_id].cards[i].card_name) + "\">";
+    ptr += "<input type=\"submit\" value=\"Save\">";
+    ptr += "</form><br>";
   }
   return ptr;
 }
@@ -535,9 +551,9 @@ void delete_card_handler()
   sensor_id = server.arg("sensor_id").toInt();
   slot_number = server.arg("slot_number").toInt();
   
-  for(i=0; i<last_read_cards_uid_length[sensor_id]; i++)
-      main_config.rfid_cards[sensor_id].cards[slot_number][i] = 0;
-  main_config.rfid_cards[sensor_id].ui_length[slot_number] = 0;
+  for(i=0; i<last_read_cards[sensor_id].uid_length; i++)
+      main_config.rfid_sensor[sensor_id].cards[slot_number].uid[i] = 0;
+  main_config.rfid_sensor[sensor_id].cards[slot_number].uid_length = 0;
   
   EEPROM.put(CONFIG_EEPROM_ADDR, main_config);
   EEPROM.commit(); 
@@ -554,11 +570,11 @@ void save_card_handler()
   sensor_id = server.arg("sensor_id").toInt();
   slot_number = server.arg("slot_number").toInt();
 
-  if(last_read_cards_uid_length[sensor_id])
+  if(last_read_cards[sensor_id].uid_length)
   {
-    for(i=0; i<last_read_cards_uid_length[sensor_id]; i++)
-      main_config.rfid_cards[sensor_id].cards[slot_number][i] = last_read_cards[sensor_id][i];
-    main_config.rfid_cards[sensor_id].ui_length[slot_number] = last_read_cards_uid_length[sensor_id];
+    for(i=0; i<last_read_cards[sensor_id].uid_length; i++)
+      main_config.rfid_sensor[sensor_id].cards[slot_number].uid[i] = last_read_cards[sensor_id].uid[i];
+    main_config.rfid_sensor[sensor_id].cards[slot_number].uid_length = last_read_cards[sensor_id].uid_length;
     
     EEPROM.put(CONFIG_EEPROM_ADDR, main_config);
     EEPROM.commit(); 
@@ -568,6 +584,23 @@ void save_card_handler()
   server.sendHeader("Location",back_address);
   server.send(303);  
 }
+
+void save_card_label_handler()
+{
+  uint8_t sensor_id, slot_number, i;
+  sensor_id = server.arg("sensor_id").toInt();
+  slot_number = server.arg("slot_number").toInt();
+
+  server.arg("card_label").toCharArray(main_config.rfid_sensor[sensor_id].cards[slot_number].card_name, MAX_CARD_LABEL_LENGTH);
+  EEPROM.put(CONFIG_EEPROM_ADDR, main_config);
+  EEPROM.commit(); 
+  
+  String back_address = "/set_rfid_cards?sensor_id";
+  back_address += String(sensor_id);
+  server.sendHeader("Location",back_address);
+  server.send(303);  
+}
+
 //===============================================================
 //                  SETUP
 //===============================================================
@@ -601,6 +634,8 @@ void setup(void){
   server.on("/set_rfid_cards", HTTP_GET, set_rfid_cards_handler);
   server.on("/save_card", HTTP_GET, save_card_handler);
   server.on("/delete_card", HTTP_GET, delete_card_handler);
+  server.on("/save_card_label", HTTP_POST, save_card_label_handler);
+  
   server.begin();                  //Start server
   Serial.println("HTTP server started");
 
