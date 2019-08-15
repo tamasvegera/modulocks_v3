@@ -289,7 +289,7 @@ void dump_byte_array(byte *buffer, byte bufferSize) {
 
 uint8_t check_game_solved()
 {
-  uint8_t game_solved = true, i, j;
+  uint8_t game_solved = true, i, j, k, current_card_matched;
   
   for(i=0; i<MAX_SENSORS; i++)
   {
@@ -309,9 +309,25 @@ uint8_t check_game_solved()
         }
         if(game_solved)
         {
+          // copy current read ID to last_read_cards
           for(j=0; j<rfids[i]->uid.size; j++)
             last_read_cards[i][j] = rfids[i]->uid.uidByte[j];
           last_read_cards_uid_length[i] = rfids[i]->uid.size;
+
+          // check if card is in saved cards of that sensor
+          game_solved = false;
+          for(j=0; j<STORED_RFID_CARDS; j++)
+          {
+            current_card_matched = true;
+            for(k=0; k< last_read_cards_uid_length[i]; k++)
+              if(main_config.rfid_cards[i].cards[j][k] != last_read_cards[i][k])
+                current_card_matched = false;
+            if(current_card_matched && last_read_cards_uid_length[i])
+            {
+              game_solved = true;
+              break;
+            }
+          }
         }
         else
         {
