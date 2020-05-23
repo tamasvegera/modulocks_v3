@@ -6,7 +6,7 @@
 
 #include <Arduino.h>
 #include "MFRC522_.h"
-#include "Adafruit_MCP23017.h"
+#include "clsPCA9555.h"
 /////////////////////////////////////////////////////////////////////////////////////
 // Functions for setting up the Arduino
 /////////////////////////////////////////////////////////////////////////////////////
@@ -28,11 +28,11 @@ MFRC522::MFRC522(	byte resetPowerDownPin	///< Arduino pin connected to MFRC522's
  * Constructor.
  * Prepares the output pins.
  */
-MFRC522::MFRC522(	Adafruit_MCP23017 *mcp,
+MFRC522::MFRC522(	PCA9555 *io_exp_,
           byte chipSelectPin,		///< Arduino pin connected to MFRC522's SPI slave select input (Pin 24, NSS, active low)
 					byte resetPowerDownPin	///< Arduino pin connected to MFRC522's reset and power down input (Pin 6, NRSTPD, active low). If there is no connection from the CPU to NRSTPD, set this to UINT8_MAX. In this case, only soft reset will be used in PCD_Init().
 				) {
-  _mcp = mcp;
+  io_exp = io_exp_;
 	_chipSelectPin = chipSelectPin;
 	_resetPowerDownPin = resetPowerDownPin;
 } // End constructor
@@ -49,11 +49,11 @@ void MFRC522::PCD_WriteRegister(	PCD_Register reg,	///< The register to write to
 									byte value			///< The value to write.
 								) {
 	SPI.beginTransaction(SPISettings(MFRC522_SPICLOCK, MSBFIRST, SPI_MODE0));	// Set the settings to work with SPI bus
-	_mcp->digitalWrite(_chipSelectPin, LOW);		// Select slave
+	io_exp->digitalWrite(_chipSelectPin, LOW);		// Select slave
   ;
 	SPI.transfer(reg);						// MSB == 0 is for writing. LSB is not used in address. Datasheet section 8.1.2.3.
 	SPI.transfer(value);
-	_mcp->digitalWrite(_chipSelectPin, HIGH);		// Release slave again
+	io_exp->digitalWrite(_chipSelectPin, HIGH);		// Release slave again
   ;
 	SPI.endTransaction(); // Stop using the SPI bus
 } // End PCD_WriteRegister()
@@ -67,13 +67,13 @@ void MFRC522::PCD_WriteRegister(	PCD_Register reg,	///< The register to write to
 									byte *values		///< The values to write. Byte array.
 								) {
 	SPI.beginTransaction(SPISettings(MFRC522_SPICLOCK, MSBFIRST, SPI_MODE0));	// Set the settings to work with SPI bus
-	_mcp->digitalWrite(_chipSelectPin, LOW);		// Select slave
+	io_exp->digitalWrite(_chipSelectPin, LOW);		// Select slave
  ;
 	SPI.transfer(reg);						// MSB == 0 is for writing. LSB is not used in address. Datasheet section 8.1.2.3.
 	for (byte index = 0; index < count; index++) {
 		SPI.transfer(values[index]);
 	}
-	_mcp->digitalWrite(_chipSelectPin, HIGH);		// Release slave again
+	io_exp->digitalWrite(_chipSelectPin, HIGH);		// Release slave again
   ;
 	SPI.endTransaction(); // Stop using the SPI bus
 } // End PCD_WriteRegister()
@@ -86,11 +86,11 @@ byte MFRC522::PCD_ReadRegister(	PCD_Register reg	///< The register to read from.
 								) {
 	byte value;
 	SPI.beginTransaction(SPISettings(MFRC522_SPICLOCK, MSBFIRST, SPI_MODE0));	// Set the settings to work with SPI bus
-	_mcp->digitalWrite(_chipSelectPin, LOW);			// Select slave
+	io_exp->digitalWrite(_chipSelectPin, LOW);			// Select slave
  ;
 	SPI.transfer(0x80 | reg);					// MSB == 1 is for reading. LSB is not used in address. Datasheet section 8.1.2.3.
 	value = SPI.transfer(0);					// Read the value back. Send 0 to stop reading.
-	_mcp->digitalWrite(_chipSelectPin, HIGH);			// Release slave again
+	io_exp->digitalWrite(_chipSelectPin, HIGH);			// Release slave again
   ;
 	SPI.endTransaction(); // Stop using the SPI bus
 	return value;
@@ -112,7 +112,7 @@ void MFRC522::PCD_ReadRegister(	PCD_Register reg,	///< The register to read from
 	byte address = 0x80 | reg;				// MSB == 1 is for reading. LSB is not used in address. Datasheet section 8.1.2.3.
 	byte index = 0;							// Index in values array.
 	SPI.beginTransaction(SPISettings(MFRC522_SPICLOCK, MSBFIRST, SPI_MODE0));	// Set the settings to work with SPI bus
-	_mcp->digitalWrite(_chipSelectPin, LOW);		// Select slave
+	io_exp->digitalWrite(_chipSelectPin, LOW);		// Select slave
  ;
 	count--;								// One read is performed outside of the loop
 	SPI.transfer(address);					// Tell MFRC522 which address we want to read
@@ -130,7 +130,7 @@ void MFRC522::PCD_ReadRegister(	PCD_Register reg,	///< The register to read from
 		index++;
 	}
 	values[index] = SPI.transfer(0);			// Read the final byte. Send 0 to stop reading.
-	_mcp->digitalWrite(_chipSelectPin, HIGH);			// Release slave again
+	io_exp->digitalWrite(_chipSelectPin, HIGH);			// Release slave again
   ;
 	SPI.endTransaction(); // Stop using the SPI bus
 } // End PCD_ReadRegister()
@@ -204,8 +204,8 @@ void MFRC522::PCD_Init() {
 	bool hardReset = false;
 
 	// Set the chipSelectPin as digital output, do not select the slave yet
-	_mcp->pinMode(_chipSelectPin, OUTPUT);
-	_mcp->digitalWrite(_chipSelectPin, HIGH);
+	io_exp->pinMode(_chipSelectPin, OUTPUT);
+	io_exp->digitalWrite(_chipSelectPin, HIGH);
 	;
 	// If a valid pin number has been set, pull device out of power down / reset state.
 	if (_resetPowerDownPin != UNUSED_PIN) {
@@ -214,9 +214,9 @@ void MFRC522::PCD_Init() {
 	
 		if (digitalRead(_resetPowerDownPin) == LOW) {	// The MFRC522 chip is in power down mode.
 			pinMode(_resetPowerDownPin, OUTPUT);		// Now set the resetPowerDownPin as digital output.
-			//_mcp->digitalWrite(_resetPowerDownPin, LOW);		// Make shure we have a clean LOW state.
+			//io_exp->digitalWrite(_resetPowerDownPin, LOW);		// Make shure we have a clean LOW state.
 			delayMicroseconds(2);				// 8.8.1 Reset timing requirements says about 100ns. Let us be generous: 2μsl
-			//_mcp->digitalWrite(_resetPowerDownPin, HIGH);		// Exit power down mode. This triggers a hard reset.
+			//io_exp->digitalWrite(_resetPowerDownPin, HIGH);		// Exit power down mode. This triggers a hard reset.
 			// Section 8.8.2 in the datasheet says the oscillator start-up time is the start up time of the crystal + 37,74μs. Let us be generous: 50ms.
 			;
 			hardReset = true;

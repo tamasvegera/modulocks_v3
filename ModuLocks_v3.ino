@@ -2,12 +2,15 @@
 #include <WiFiClient.h>
 #include <ESP8266WebServer.h>
 #include <ESP8266mDNS.h>
+#include <ESP8266HTTPUpdateServer.h>
 #include <EEPROM.h>
 #include "MFRC522_.h"
 #include <Wire.h>
-#include "Adafruit_MCP23017.h"
+#include "clsPCA9555.h"
 #include <SPI.h>
 #include <Ticker.h>
+
+const char* fw_version = "1.0";
 
 #define NEEDED_EEPROM_SIZE    2048
 #define CONFIG_EEPROM_ADDR    0
@@ -20,7 +23,11 @@
 #define STORED_RFID_CARDS   5
 #define CARD_UID_MAX_LENGTH   10
 
-Adafruit_MCP23017 mcp;
+#define SENSOR_VDD_EN_PIN_IO_EXP  0
+#define LED_BLUE_PIN  4
+#define LED_RED_PIN 5
+
+PCA9555 io_exp(0x20);
 Ticker sec_ticker;
 
 enum game_status{NOT_SOLVED, DELAYED_SOLVED, WAIT_FOR_CHECK, SOLVED};
@@ -37,12 +44,17 @@ enum sensor_types_enum{SENSOR_NONE, SENSOR_RFID, SENSOR_IR, SENSOR_TOUCH, SENSOR
 const char* ssid = "ESPWebServer";
 const char* password = "12345678";
 
-uint8_t io_to_expio[MAX_SENSORS] = {15, 14, 13, 12, 11, 10, 9, 8, 7, 6};
+uint8_t reconfig_is_needed = false;
+
+uint8_t io_to_expio[MAX_SENSORS] = {17, 16, 15, 14, 13, 12, 10, 11, 6, 7};
 uint8_t relay_expios[NO_RELAY_OUTS] = {1, 2, 3};
+
+uint8_t heartbeat=0;
 
 MFRC522 *rfids[MAX_SENSORS];
 
 ESP8266WebServer server(80); //Server on port 80
+ESP8266HTTPUpdateServer httpUpdater;
 
 enum relay_switch_states {relay_NC, relay_NO};
 
@@ -69,19 +81,42 @@ struct RelayConfig
   enum relay_states state;
 };
 
-struct CONFIG
+typedef struct CONFIG_s
 {
     struct SensorConfig all_sensor_config[MAX_SENSORS];
     struct RelayConfig relays_config[NO_RELAY_OUTS];
     char sound_file[MAX_SOUND_FILENAME_SIZE];
     uint8_t game_solved_delay;
     struct RFID_sensor_config rfid_sensor[MAX_SENSORS];
-} main_config;
+} main_config_type;
+volatile main_config_type main_config;
 
 struct RFID_card last_read_cards[MAX_SENSORS];
 
+String char_array_to_String(char* data)
+{
+  String new_string="";
+  uint8_t i;
+
+  for(i=0; data[i]!='\0'; i++)
+    new_string += data[i];
+
+  return new_string;
+}
+
+// max string length: 256
+void String_to_volatile_char_array(volatile char* data, String new_string, uint8_t string_length)
+{
+  char char_array[256] = "";
+  uint8_t i;
+
+  new_string.toCharArray(char_array, string_length);
+  memcpy((char*)data, char_array, string_length);  
+}
+
 String SendMainHTML()
 {
+  volatile char test_char_array[] = "asdf";
   uint8_t i, j;
   
   String ptr = "<head><meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0, user-scalable=no\"></head>";
@@ -142,9 +177,18 @@ String SendMainHTML()
     ptr += "<input type=\"number\" name=\"off_delay" + relay_number + "\" min=\"0\" max=\"10\" value=\"" + String(main_config.relays_config[i].off_delay) + "\"><br>";
   }
   ptr += "Sound file (max. " + String(MAX_SOUND_FILENAME_SIZE) + " characters: ";
-  ptr += "<input type=\"text\" name=\"sound\" value=\"" + String(main_config.sound_file) + "\"><br>";
+
+  //ptr += "<input type=\"text\" name=\"sound\" value=\"" + String(main_config.sound_file) + "\"><br>";
+  ptr += "<input type=\"text\" name=\"sound\" value=\"" + char_array_to_String((char*)main_config.sound_file) + "\"><br>";
   ptr += "<input type=\"submit\" value=\"Save\">";
   ptr += "</form><br>";
+
+  ptr += "<a href=\"/update\">";
+  ptr += "<button>Firmware update</button></a><br><br>";
+
+  ptr += "Firmware version: ";
+  ptr += fw_version;
+
   return ptr;
 }
 
@@ -157,22 +201,23 @@ void reconfig()
     switch(main_config.all_sensor_config[i].type)
     {
       case SENSOR_NONE:
-        mcp.pinMode(io_to_expio[i], INPUT);
+        io_exp.pinMode(io_to_expio[i], INPUT);
         break;
       case SENSOR_RFID:
-        rfids[i] = new MFRC522(&mcp, io_to_expio[i], 0xFF);
+        rfids[i] = new MFRC522(&io_exp, io_to_expio[i], 0xFF);
         rfids[i]->PCD_Init();
-        delay(10);
+        delay(100);
         rfids[i]->PCD_DumpVersionToSerial();
+        delay(100);
         break;
       case SENSOR_IR:
-        mcp.pinMode(io_to_expio[i], INPUT);
+        io_exp.pinMode(io_to_expio[i], INPUT);
         break;
       case SENSOR_TOUCH:
-        mcp.pinMode(io_to_expio[i], INPUT);
+        io_exp.pinMode(io_to_expio[i], INPUT);
         break;
       case SENSOR_HALL:
-        mcp.pinMode(io_to_expio[i], INPUT);
+        io_exp.pinMode(io_to_expio[i], INPUT);
         break;
     }
   }
@@ -224,12 +269,14 @@ void handleConfig()
   }
   main_config.game_solved_delay = (server.arg("game_solved_delay")).toInt();
   
-  server.arg("sound").toCharArray(main_config.sound_file, MAX_SOUND_FILENAME_SIZE);
+  //server.arg("sound").toCharArray(main_config.sound_file, MAX_SOUND_FILENAME_SIZE);
+  String_to_volatile_char_array(main_config.sound_file, server.arg("sound"), MAX_SOUND_FILENAME_SIZE);
+  
   //Serial.println(server.arg("sound"));
   EEPROM.put(CONFIG_EEPROM_ADDR, main_config);
   EEPROM.commit();
 
-  reconfig();
+  reconfig_is_needed = true;
   
 /*  Serial.println("config handler");
   for(int i=0; i<server.args(); i++)
@@ -286,7 +333,7 @@ void print_config()
     Serial.print(": ");
     Serial.println(sensor_types[main_config.all_sensor_config[i].type]);
   }
-  Serial.println(main_config.sound_file);
+  Serial.println((char*)main_config.sound_file);
 }
 
 void dump_byte_array(byte *buffer, byte bufferSize) {
@@ -299,7 +346,6 @@ void dump_byte_array(byte *buffer, byte bufferSize) {
 uint8_t check_game_solved()
 {
   uint8_t game_solved = true, i, j, k, current_card_matched;
-  
   for(i=0; i<MAX_SENSORS; i++)
   {
     switch(main_config.all_sensor_config[i].type)
@@ -341,17 +387,17 @@ uint8_t check_game_solved()
         else
         {
           last_read_cards[i].uid_length = 0;
-          for(j=0; j<rfids[i]->uid.size; j++)
+          for(j=0; j<CARD_UID_MAX_LENGTH; j++)
             last_read_cards[i].uid[j] = 0x00;
         }   
         rfids[i]->PICC_IsNewCardPresent();
         break;
       case SENSOR_IR:
-        if(mcp.digitalRead(io_to_expio[i]) == main_config.all_sensor_config[i].on_off)
+        if(io_exp.digitalRead(io_to_expio[i]) == main_config.all_sensor_config[i].on_off)
           game_solved = false;
         break;
       case SENSOR_HALL:
-        if(mcp.digitalRead(io_to_expio[i]) == main_config.all_sensor_config[i].on_off)
+        if(io_exp.digitalRead(io_to_expio[i]) == main_config.all_sensor_config[i].on_off)
           game_solved = false;
         break;
       case SENSOR_TOUCH:
@@ -401,9 +447,9 @@ void relay_handler(void)
         Serial.print(i);
         Serial.println(" turning on");
         if(main_config.relays_config[i].nc_no == relay_NC)    // turning on relays
-          mcp.digitalWrite(relay_expios[i], 1);
+          io_exp.digitalWrite(relay_expios[i], 1);
         else
-          mcp.digitalWrite(relay_expios[i], 0);
+          io_exp.digitalWrite(relay_expios[i], 0);
         // Start turning off delay counter  
         main_config.relays_config[i].off_delay_counter = main_config.relays_config[i].off_delay;
         main_config.relays_config[i].state = RELAY_DELAY_OFF_STARTED;
@@ -418,9 +464,9 @@ void relay_handler(void)
       Serial.print(i);
       Serial.println(" turning off");
       if(main_config.relays_config[i].nc_no == relay_NC)
-        mcp.digitalWrite(relay_expios[i], 0);
+        io_exp.digitalWrite(relay_expios[i], 0);
       else
-        mcp.digitalWrite(relay_expios[i], 1);  
+        io_exp.digitalWrite(relay_expios[i], 1);  
 
       main_config.relays_config[i].state = RELAY_OFF;
     }  
@@ -475,6 +521,10 @@ String send_rfid_config_html()
   
   String ptr = "<head><meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0, user-scalable=no\"></head>";
   ptr+= "<center><b>ModuLocks RFID config</center></b><br>";
+  
+  ptr += "<a href=\"/\">";
+  ptr += "<button>Back to main menu</button></a><br><br>";
+  
   ptr+= "Select which RFID sensor you want to configurate. Cards are saved to sensor inputs, not the RFID sensors.<br><center>";
 
   for(i=0; i< MAX_SENSORS; i++)
@@ -505,6 +555,9 @@ String send_set_rfid_cards_html(uint8_t sensor_id)
   ptr += "<center><b>RFID config for Sensor input " + String(sensor_id+1);
   ptr += "</center></b><br>";
 
+  ptr += "<a href=\"/rfid_config\">";
+  ptr += "<button>Back to RFID sensors</button></a><br><br>";
+  
   ptr+= "Current card: <input type=\"text\" value=\"";
   for(i=0; i<last_read_cards[sensor_id].uid_length; i++)
     ptr += String(last_read_cards[sensor_id].uid[i], HEX) + " ";
@@ -531,7 +584,7 @@ String send_set_rfid_cards_html(uint8_t sensor_id)
     ptr += "<form action=\"/save_card_label?sensor_id=" + String(sensor_id);
     ptr += "&slot_number=" + String(i);
     ptr += "\" method=\"POST\">Label: ";
-    ptr += "<input type=\"text\" name=\"card_label\" value=\"" + String(main_config.rfid_sensor[sensor_id].cards[i].card_name) + "\">";
+    ptr += "<input type=\"text\" name=\"card_label\" value=\"" + char_array_to_String((char*)(main_config.rfid_sensor[sensor_id].cards[i].card_name)) + "\">";
     ptr += "<input type=\"submit\" value=\"Save\">";
     ptr += "</form><br>";
   }
@@ -579,7 +632,7 @@ void save_card_handler()
     EEPROM.put(CONFIG_EEPROM_ADDR, main_config);
     EEPROM.commit(); 
   }
-  String back_address = "/set_rfid_cards?sensor_id";
+  String back_address = "/set_rfid_cards?sensor_id=";
   back_address += String(sensor_id);
   server.sendHeader("Location",back_address);
   server.send(303);  
@@ -591,11 +644,13 @@ void save_card_label_handler()
   sensor_id = server.arg("sensor_id").toInt();
   slot_number = server.arg("slot_number").toInt();
 
-  server.arg("card_label").toCharArray(main_config.rfid_sensor[sensor_id].cards[slot_number].card_name, MAX_CARD_LABEL_LENGTH);
+  //server.arg("card_label").toCharArray(main_config.rfid_sensor[sensor_id].cards[slot_number].card_name, MAX_CARD_LABEL_LENGTH);
+  String_to_volatile_char_array(main_config.rfid_sensor[sensor_id].cards[slot_number].card_name, server.arg("card_label"), MAX_CARD_LABEL_LENGTH);
+  
   EEPROM.put(CONFIG_EEPROM_ADDR, main_config);
   EEPROM.commit(); 
   
-  String back_address = "/set_rfid_cards?sensor_id";
+  String back_address = "/set_rfid_cards?sensor_id=";
   back_address += String(sensor_id);
   server.sendHeader("Location",back_address);
   server.send(303);  
@@ -606,13 +661,17 @@ void save_card_label_handler()
 //===============================================================
 void setup(void){
   uint8_t i;
+
+  io_exp.pinMode(SENSOR_VDD_EN_PIN_IO_EXP, OUTPUT); // TODO optimize power consumption with this pin
+  io_exp.pinMode(LED_BLUE_PIN, OUTPUT);
+  io_exp.pinMode(LED_RED_PIN, OUTPUT);
+  io_exp.digitalWrite(LED_BLUE_PIN, HIGH);
   
+  ESP.wdtDisable();
   EEPROM.begin(NEEDED_EEPROM_SIZE);
   EEPROM.get(CONFIG_EEPROM_ADDR, main_config);
   if(main_config.all_sensor_config[0].type == 0xFF)
     reset_config();
-
-  mcp.begin();
   
   Serial.begin(115200);
   Serial.println("");
@@ -622,7 +681,7 @@ void setup(void){
   
   WiFi.mode(WIFI_AP);           //Only Access point
   WiFi.softAP(ssid, password);  //Start HOTspot removing password will disable security
- 
+  
   IPAddress myIP = WiFi.softAPIP(); //Get IP address
   Serial.print("HotSpt IP:");
   Serial.println(myIP);
@@ -635,14 +694,18 @@ void setup(void){
   server.on("/save_card", HTTP_GET, save_card_handler);
   server.on("/delete_card", HTTP_GET, delete_card_handler);
   server.on("/save_card_label", HTTP_POST, save_card_label_handler);
+
+  httpUpdater.setup(&server);
   
   server.begin();                  //Start server
+
+  MDNS.addService("http", "tcp", 80);
   Serial.println("HTTP server started");
 
   reconfig();
 
   for(i=0; i<NO_RELAY_OUTS; i++)
-    mcp.pinMode(relay_expios[i], OUTPUT);
+    io_exp.pinMode(relay_expios[i], OUTPUT);
   
 }
 //===============================================================
@@ -650,6 +713,17 @@ void setup(void){
 //===============================================================
 void loop(void){
   server.handleClient();          //Handle client requests
+  if(heartbeat)
+  {
+    io_exp.digitalWrite(LED_BLUE_PIN, LOW);
+    heartbeat=0;
+  }
+  else
+  {
+    io_exp.digitalWrite(LED_BLUE_PIN, HIGH);
+    heartbeat=1;
+  }
+  
   if(check_game_solved())
   {
     solve_game();
@@ -658,8 +732,12 @@ void loop(void){
   {
     game_is_solved = NOT_SOLVED;
   }
-
   if(game_is_solved == SOLVED)
     relay_handler();
   delay(50);
+  if(reconfig_is_needed)
+  {
+    reconfig();
+    reconfig_is_needed = false;
+  }
 }

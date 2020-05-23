@@ -82,9 +82,9 @@
 #include <stdint.h>
 #include <Arduino.h>
 #include <SPI.h>
-#include "Adafruit_MCP23017.h"
+#include "clsPCA9555.h"
 
-#define MFRC522_SPICLOCK SPI_CLOCK_DIV4			// MFRC522 accept upto 10MHz
+#define MFRC522_SPICLOCK 8096 //SPI_CLOCK_DIV128			// MFRC522 accept upto 10MHz
 
 // Firmware data for self-test
 // Reference values based on firmware version
@@ -336,7 +336,7 @@ public:
 	MFRC522();
 	DEPRECATED_MSG("use MFRC522(byte chipSelectPin, byte resetPowerDownPin)")
 	MFRC522(byte resetPowerDownPin);
-	MFRC522(Adafruit_MCP23017 *mcp, byte chipSelectPin, byte resetPowerDownPin);
+	MFRC522(PCA9555 *io_exp_, byte chipSelectPin, byte resetPowerDownPin);
 	
 	/////////////////////////////////////////////////////////////////////////////////////
 	// Basic interface functions for communicating with the MFRC522
@@ -433,7 +433,7 @@ public:
 	virtual bool PICC_ReadCardSerial();
 	
 protected:
-  Adafruit_MCP23017 *_mcp;
+  PCA9555 *io_exp;
 	byte _chipSelectPin;		// Arduino pin connected to MFRC522's SPI slave select input (Pin 24, NSS, active low)
 	byte _resetPowerDownPin;	// Arduino pin connected to MFRC522's reset and power down input (Pin 6, NRSTPD, active low)
 	StatusCode MIFARE_TwoStepHelper(byte command, byte blockAddr, int32_t data);
